@@ -9,3 +9,7 @@ This package is for the application that receives client changes and provides th
 ## Documentation
 
 Full documentation is available at [laravel-tether.com](https://laravel-tether.com/docs).
+
+## Other Tether packages
+
+- [Tether Client](https://github.com/lrakauskas/tether-client): The client-side package for recording local changes and syncing them back to the server.
