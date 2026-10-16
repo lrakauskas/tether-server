@@ -1,0 +1,22 @@
+{
+    "core":  {
+                 "v0.0.1":  {
+                                "source_tree":  "3c78dd8defc392b35ba6faf5481c0c4344584917",
+                                "commit":  "c9bf724e56e698880692fefe6ebe5c95a6b2392c"
+                            },
+                 "v1.0.0":  {
+                                "source_tree":  "3c78dd8defc392b35ba6faf5481c0c4344584917",
+                                "commit":  "3c92507b6ac0e018837e98269a7ef2b9100aa30e"
+                            }
+             },
+    "client":  {
+                   "v0.0.1":  {
+                                  "source_tree":  "09aa5358cff39ac58b3b38f3168a9ad73aff49cf",
+                                  "commit":  "c00a8cb5d30571467d17e6aed3a4bf350474bc4f"
+                              },
+                   "v1.0.0":  {
+                                  "source_tree":  "09aa5358cff39ac58b3b38f3168a9ad73aff49cf",
+                                  "commit":  "a9f8999e0e07b5b87353908e721429f29a5e5530"
+                              }
+               }
+}

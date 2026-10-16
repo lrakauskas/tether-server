@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="tests/Compatibility/bootstrap.php"
+         colors="true">
+    <testsuites>
+        <testsuite name="Released v1 compatibility">
+            <directory>tests/Compatibility/Unit</directory>
+        </testsuite>
+    </testsuites>
+</phpunit>

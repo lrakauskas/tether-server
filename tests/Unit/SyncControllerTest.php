@@ -208,6 +208,13 @@ it('pull returns a validation error when limit is not an integer', function () {
         ->assertJsonValidationErrors(['limit']);
 });
 
+it('pull preserves v1 validation by rejecting non-integer cursors', function () {
+    $this->postJson(route('tether.pull'), [
+        'client_id' => 'client-abc',
+        'last_sync_cursor' => '123|bad|!',
+    ])->assertUnprocessable()->assertJsonValidationErrors(['last_sync_cursor']);
+});
+
 // ── pushMutationMapper ────────────────────────────────────────────────────────────
 
 it('push applies the pushMutationMapper before writing the mutation payload', function () {
@@ -323,10 +330,12 @@ it('push runs the pushMutationMapper before conflict detection', function () {
 it('pull respects a limit and returns has_more true when more rows exist', function () {
     $this->app->make(SyncRegistry::class)->register(TestPost::class);
 
+    $time = now()->subHour()->startOfSecond();
     for ($i = 1; $i <= 5; $i++) {
         TestPost::create([
             'tether_id' => sprintf('01HXYZ0001AABBCCDD00%08d', $i),
             'title' => "Post {$i}",
+            'updated_at' => $time->copy()->addSeconds($i),
         ]);
     }
 

@@ -19,7 +19,8 @@ return [
     |
     | The name of the table that stores all server-side applied mutations.
     | Pull cursors are integer microsecond timestamps derived from syncable
-    | model updated_at / deleted_at values, not this table's ID.
+    | model updated_at / deleted_at values, not this table's ID. Pull limits
+    | are targets: the entire boundary timestamp group is always returned.
     |
     */
     'table' => env('TETHER_SERVER_TABLE', 'tether_server_mutations'),

@@ -5,4 +5,4 @@ use Tests\TestCase;
 
 pest()->extend(TestCase::class)
     ->use(RefreshDatabase::class)
-    ->in('Unit');
+    ->in('Unit', 'Compatibility/Unit');
