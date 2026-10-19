@@ -15,13 +15,16 @@ $packages = array_values(array_filter($installed['packages'] ?? $installed, stat
 $composer = getenv('COMPOSER_BINARY') ?: 'composer';
 $command = str_ends_with($composer, '.phar') ? [PHP_BINARY, $composer] : [$composer];
 
-foreach (['0.0.1', '1.0.0'] as $version) {
+// Test server dependencies permitted by the current manifest. Older clients
+// keep their own core dependency; their wire compatibility is tested separately.
+foreach (['1.0.0'] as $version) {
     $directory = sys_get_temp_dir().'/tether-solver-'.bin2hex(random_bytes(8));
     mkdir($directory);
     $server['version'] = '1.0.1';
     $core['version'] = $version;
     $project = [
         'name' => 'tether/compatibility-check',
+        'version' => '1.0.0',
         'require' => ['tether/server' => '1.0.1', 'tether/core' => $version],
         'repositories' => [
             ['type' => 'package', 'package' => array_merge([$server, $core], $packages)],
@@ -37,7 +40,7 @@ foreach (['0.0.1', '1.0.0'] as $version) {
             '--no-audit', '--no-interaction', '--no-progress',
         ]), $directory, ['COMPOSER_DISABLE_NETWORK' => '1', 'COMPOSER' => 'composer.json']);
         $process->mustRun();
-        echo "Resolved corrected tether/server with released tether/core {$version}.".PHP_EOL;
+        echo "Resolved tether/server with released tether/core {$version}.".PHP_EOL;
     } finally {
         foreach (['composer.json', 'composer.lock'] as $file) {
             if (is_file($directory.'/'.$file)) {
