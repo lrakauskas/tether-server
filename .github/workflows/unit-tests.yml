@@ -28,3 +28,9 @@ jobs:
 
       - name: Run tests
         run: php vendor/bin/pest
+
+      - name: Verify released v1 client compatibility
+        run: php vendor/bin/pest --configuration phpunit-compatibility.xml
+
+      - name: Verify released core dependency resolution
+        run: php tests/Compatibility/verify-dependencies.php

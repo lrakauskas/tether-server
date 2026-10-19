@@ -2,11 +2,16 @@
 
 namespace Tether\Server;
 
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Http\Request;
+use Tether\Core\Sync\Snapshot;
+
 final readonly class SyncRegistration
 {
     /**
-     * @param callable|null $scope
-     * @param callable|null $pullSnapshotMapper
+     * @param (callable(Builder<Model>, string, Request): Builder<Model>)|null $scope
+     * @param (callable(Snapshot, Model): Snapshot)|null $pullSnapshotMapper
      * @param callable|null $pushMutationMapper
      * @param callable|null $conflictResolver
      */

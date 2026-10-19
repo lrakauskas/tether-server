@@ -2,6 +2,8 @@
 
 namespace Tether\Server;
 
+use Carbon\CarbonInterface;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
 use Illuminate\Http\Request;
@@ -21,14 +23,9 @@ class StateSnapshotGenerator
     ) {}
 
     /**
-     * Return a state snapshot for all registered models, optionally filtered to
-     * records changed since the given cursor (unix microseconds integer).
-     *
-     * When $limit is provided the response will contain at most that many snapshots.
-     * If the underlying data set has more rows the response includes `has_more: true`
-     * and the client should issue another pull using the returned `new_sync_cursor`.
-     * Because upsert is idempotent, rows at the cursor boundary may be re-delivered
-     * on subsequent pages - this is safe and expected.
+     * Return globally ordered state snapshots after an integer microsecond cursor.
+     * The limit is a target: returning the entire boundary timestamp group lets
+     * pagination resume with a timestamp alone without losing tied records.
      */
     public function since(PullRequest $pullRequest, Request $request): PullResult
     {
@@ -37,15 +34,13 @@ class StateSnapshotGenerator
 
         PullSyncStarted::dispatch($syncId, $pullRequest, $request, $startedAt);
 
-        $snapshots    = [];
-        $maxTimestamp = null;
-        $hasMore      = false;
-
         $cursor = $pullRequest->cursor;
         $clientId = $pullRequest->clientId;
         $limit = $pullRequest->limit;
         $syncKey = config('tether-server.sync_key', 'tether_id');
         $cursorCarbon = $cursor !== null ? $this->fromMicros($cursor) : null;
+        $queries = [];
+        $timestamps = [];
 
         TetherLog::debug('Generating state snapshots', 1, [
             'client_id' => $clientId,
@@ -55,40 +50,34 @@ class StateSnapshotGenerator
         ]);
 
         foreach ($this->registry->getRegistrations() as $modelClass => $registration) {
-            // Stop collecting entirely once the limit is already satisfied.
-            if ($limit !== null && count($snapshots) >= $limit) {
-                $hasMore = true;
-                break;
-            }
-
             $usesSoftDeletes = in_array(SoftDeletes::class, class_uses_recursive($modelClass));
-
             $query = $modelClass::query();
 
             if ($usesSoftDeletes) {
                 $query->withoutGlobalScope(SoftDeletingScope::class);
             }
 
+            $model = $query->getModel();
+            $grammar = $query->getQuery()->getGrammar();
+            $updatedAt = $grammar->wrap($model->qualifyColumn('updated_at'));
+            $deletedAt = $grammar->wrap($model->qualifyColumn('deleted_at'));
+            $timestampSql = $usesSoftDeletes
+                ? "CASE WHEN {$deletedAt} IS NOT NULL AND ({$updatedAt} IS NULL OR {$deletedAt} > {$updatedAt}) THEN {$deletedAt} ELSE {$updatedAt} END"
+                : $updatedAt;
+
+            $query->whereNotNull($model->qualifyColumn($syncKey));
+
             if ($cursorCarbon !== null) {
-                if ($usesSoftDeletes) {
-                    $query->where(function ($q) use ($cursorCarbon): void {
-                        $q->where('updated_at', '>', $cursorCarbon)
-                            ->orWhere('deleted_at', '>', $cursorCarbon);
-                    });
-                } else {
-                    $query->where('updated_at', '>', $cursorCarbon);
-                }
+                // Bind strings in the model's storage format so fractional seconds
+                // are not discarded by the connection's default date formatting.
+                $query->whereRaw("{$timestampSql} > ?", [$cursorCarbon->format($model->getDateFormat())]);
             }
-            TetherLog::debug('Built snapshot base query', 3, [
-                'model_class' => $modelClass,
-                'cursor' => $cursor,
-                'query' => $query->toSql(),
-                'bindings' => $query->getBindings(),
-            ]);
 
             if ($registration->scope !== null) {
                 $query = ($registration->scope)($query, $clientId, $request);
             }
+
+            $query->reorder()->orderByRaw($timestampSql)->orderBy($model->qualifyColumn($syncKey));
 
             TetherLog::debug('Built snapshot scoped query', 3, [
                 'model_class' => $modelClass,
@@ -97,67 +86,93 @@ class StateSnapshotGenerator
                 'bindings' => $query->getBindings(),
             ]);
 
-            // When paginating, limit the DB query to only what's needed plus one
-            // extra row so we can detect whether more rows exist without loading
-            // the full result set.
+            $queries[] = compact('query', 'timestampSql', 'modelClass', 'registration', 'usesSoftDeletes');
+
             if ($limit !== null) {
-                $remaining = $limit - count($snapshots);
-                $query->orderBy('updated_at')->limit($remaining + 1);
-            }
-
-            $pullSnapshotMapper = $registration->pullSnapshotMapper;
-
-            foreach ($query->get() as $row) {
-                // Stop mid-model if the limit is reached, signalling more data.
-                if ($limit !== null && count($snapshots) >= $limit) {
-                    $hasMore = true;
-                    break 2;
+                $columns = [$model->qualifyColumn('updated_at')];
+                if ($usesSoftDeletes) {
+                    $columns[] = $model->qualifyColumn('deleted_at');
                 }
 
-                $entityId = $row->getAttribute($syncKey);
-
-                if ($entityId === null) {
-                    continue;
-                }
-
-                $isTrashed = $usesSoftDeletes && $row->trashed();
-                $operation = $isTrashed ? 'delete' : 'upsert';
-
-                // Strip the server's primary key - it is server-local and meaningless on the client.
-                $attributes = $row->getAttributes();
-                unset($attributes[$row->getKeyName()]);
-
-                $snapshot = new Snapshot(
-                    entityId: $entityId,
-                    model: class_basename($modelClass),
-                    operation: $operation,
-                    payload: $attributes,
-                );
-
-                if ($pullSnapshotMapper !== null) {
-                    $snapshot = ($pullSnapshotMapper)($snapshot, $row);
-                }
-
-                $snapshots[] = $snapshot;
-
-                // Track the maximum timestamp seen to advance the cursor.
-                $rowMax = $row->updated_at;
-
-                if ($usesSoftDeletes && $row->deleted_at !== null) {
-                    if ($rowMax === null || $row->deleted_at->greaterThan($rowMax)) {
-                        $rowMax = $row->deleted_at;
-                    }
-                }
-
-                if ($rowMax !== null) {
-                    if ($maxTimestamp === null || $rowMax->greaterThan($maxTimestamp)) {
-                        $maxTimestamp = $rowMax;
+                foreach ((clone $query)->select($columns)->limit($limit)->get() as $row) {
+                    $timestamp = $this->rowTimestamp($row, $usesSoftDeletes);
+                    if ($timestamp !== null) {
+                        $timestamps[] = $timestamp;
                     }
                 }
             }
         }
 
-        $newCursor = $maxTimestamp !== null ? $this->toMicros($maxTimestamp) : $cursor;
+        // The first N rows of each model contain the global Nth timestamp.
+        // Fetch the whole group at that boundary, even when it exceeds N.
+        sort($timestamps, SORT_NUMERIC);
+        $boundary = $limit !== null && $timestamps !== [] ? $timestamps[min($limit, count($timestamps)) - 1] : null;
+        $candidates = [];
+
+        foreach ($queries as $definition) {
+            if ($limit !== null && $boundary === null) {
+                continue;
+            }
+
+            $query = clone $definition['query'];
+            if ($boundary !== null) {
+                $boundaryValue = $this->fromMicros($boundary)->format($query->getModel()->getDateFormat());
+                $query->whereRaw("{$definition['timestampSql']} <= ?", [$boundaryValue]);
+            }
+
+            foreach ($query->get() as $row) {
+                $candidates[] = [
+                    'timestamp' => $this->rowTimestamp($row, $definition['usesSoftDeletes']),
+                    'model' => $definition['modelClass'],
+                    'entity_id' => (string) $row->getAttribute($syncKey),
+                    'row' => $row,
+                    'soft_deletes' => $definition['usesSoftDeletes'],
+                    'mapper' => $definition['registration']->pullSnapshotMapper,
+                ];
+            }
+        }
+
+        usort($candidates, static fn (array $a, array $b): int =>
+            ($a['timestamp'] <=> $b['timestamp'])
+            ?: strcmp($a['model'], $b['model'])
+            ?: strcmp($a['entity_id'], $b['entity_id']));
+
+        $snapshots = [];
+        $newCursor = $cursor;
+
+        foreach ($candidates as $candidate) {
+            $row = $candidate['row'];
+            $attributes = $row->getAttributes();
+            unset($attributes[$row->getKeyName()]);
+
+            $snapshot = new Snapshot(
+                entityId: $candidate['entity_id'],
+                model: class_basename($candidate['model']),
+                operation: $candidate['soft_deletes'] && method_exists($row, 'trashed') && $row->trashed() ? 'delete' : 'upsert',
+                payload: $attributes,
+            );
+
+            if ($candidate['mapper'] !== null) {
+                $snapshot = ($candidate['mapper'])($snapshot, $row);
+            }
+
+            $snapshots[] = $snapshot;
+            if ($candidate['timestamp'] !== null) {
+                $newCursor = $candidate['timestamp'];
+            }
+        }
+
+        $hasMore = false;
+        if ($limit !== null && $newCursor !== null) {
+            foreach ($queries as $definition) {
+                $query = clone $definition['query'];
+                $nextValue = $this->fromMicros($newCursor)->format($query->getModel()->getDateFormat());
+                if ($query->whereRaw("{$definition['timestampSql']} > ?", [$nextValue])->exists()) {
+                    $hasMore = true;
+                    break;
+                }
+            }
+        }
 
         TetherLog::debug('Generated state snapshots', 1, [
             'snapshot_count' => count($snapshots),
@@ -165,11 +180,7 @@ class StateSnapshotGenerator
             'has_more' => $hasMore,
         ]);
 
-        $result = new PullResult(
-            snapshots: $snapshots,
-            newSyncCursor: $newCursor,
-            hasMore: $hasMore,
-        );
+        $result = new PullResult(snapshots: $snapshots, newSyncCursor: $newCursor, hasMore: $hasMore);
 
         PullSyncCompleted::dispatch(
             syncId: $syncId,
@@ -183,7 +194,18 @@ class StateSnapshotGenerator
         return $result;
     }
 
-    private function toMicros(\Carbon\CarbonInterface $dt): int
+    private function rowTimestamp(Model $row, bool $usesSoftDeletes): ?int
+    {
+        $timestamp = $row->getAttribute('updated_at');
+        $deletedAt = $usesSoftDeletes ? $row->getAttribute('deleted_at') : null;
+        if ($deletedAt !== null && ($timestamp === null || $deletedAt->greaterThan($timestamp))) {
+            $timestamp = $deletedAt;
+        }
+
+        return $timestamp !== null ? $this->toMicros($timestamp) : null;
+    }
+
+    private function toMicros(CarbonInterface $dt): int
     {
         return $dt->getTimestamp() * 1_000_000 + $dt->microsecond;
     }
